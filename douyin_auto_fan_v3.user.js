@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音自动刷视频收藏助手
 // @namespace    douyin-autofan
-// @version      3.0
+// @version      4.0
 // @description  自动刷抖音推荐流视频，按点赞数和发布时间分类收藏到指定收藏夹
 // @author       AutoFan
 // @match        https://www.douyin.com/*
@@ -25,8 +25,16 @@
         S_LEVEL_DAYS: 7,
         S_LEVEL_FOLDER: 'S级待分类',
         
-        // 播放进度要求
-        PLAY_PROGRESS_MIN: 0.5, // 至少播放50%
+        // 短视频（2分钟以下）播放进度要求（随机70%~99%）
+        SHORT_VIDEO_MIN_PROGRESS: 0.7,
+        SHORT_VIDEO_MAX_PROGRESS: 0.99,
+        
+        // 长视频（2分钟以上）播放进度要求（随机40%~60%）
+        LONG_VIDEO_MIN_PROGRESS: 0.4,
+        LONG_VIDEO_MAX_PROGRESS: 0.6,
+        
+        // 短视频与长视频的分界点（2分钟）
+        SHORT_VIDEO_THRESHOLD_SECONDS: 120,
         
         // 间歇运行设置
         RUN_DURATION: 2 * 60 * 60 * 1000, // 运行2小时
@@ -42,6 +50,7 @@
     let isResting = false;
     let restEndTime = 0;
     let controlPanel = null;
+    let currentTargetProgress = 0; // 当前视频的目标进度
     let stats = {
         skipped: 0,
         aLevel: 0,
@@ -50,16 +59,54 @@
     };
 
     function init() {
-        console.log('[抖音自动助手 v3.0] 脚本已启动');
+        console.log('[抖音自动助手 v4.0] 脚本已启动');
         console.log('📌 A级分类：7天内发布 + 30万~80万点赞 → 收藏到"A级待分类"');
         console.log('📌 S级分类：7天以上发布 + 80万以上点赞 或 100万点赞以上 → 收藏到"S级待分类"');
-        console.log('📌 播放进度要求：至少50%以上才能收藏');
+        console.log('📌 播放进度要求：');
+        console.log('   - 短视频（<2分钟）：随机70%~99%');
+        console.log('   - 长视频（≥2分钟）：随机40%~60%');
         console.log('📌 间歇运行：运行2小时后随机休息2-3小时');
         
         createControlPanel();
         setupObserver();
         startRunTimer();
         startMonitoring();
+    }
+
+    function getRandomProgress(durationSeconds) {
+        const isShortVideo = durationSeconds < CONFIG.SHORT_VIDEO_THRESHOLD_SECONDS;
+        
+        if (isShortVideo) {
+            const min = CONFIG.SHORT_VIDEO_MIN_PROGRESS;
+            const max = CONFIG.SHORT_VIDEO_MAX_PROGRESS;
+            return min + Math.random() * (max - min);
+        } else {
+            const min = CONFIG.LONG_VIDEO_MIN_PROGRESS;
+            const max = CONFIG.LONG_VIDEO_MAX_PROGRESS;
+            return min + Math.random() * (max - min);
+        }
+    }
+
+    function isVideoTypeText(durationSeconds) {
+        const isShortVideo = durationSeconds < CONFIG.SHORT_VIDEO_THRESHOLD_SECONDS;
+        return isShortVideo ? '短视频' : '长视频';
+    }
+
+    function updateProgress(progress, videoDuration) {
+        const progressText = document.getElementById('progress-text');
+        const progressFill = document.getElementById('progress-bar-fill');
+        
+        if (progressText) {
+            const percentage = Math.round(progress * 100);
+            const currentTime = formatTime(videoDuration * progress);
+            const totalTime = formatTime(videoDuration);
+            const targetInfo = currentTargetProgress > 0 ? ` (目标${Math.round(currentTargetProgress * 100)}%)` : '';
+            progressText.textContent = `${currentTime} / ${totalTime} (${percentage}%${targetInfo}`;
+        }
+        
+        if (progressFill) {
+            progressFill.style.width = (progress * 100) + '%';
+        }
     }
 
     function createControlPanel() {
@@ -220,7 +267,7 @@
                     background: #dc2626;
                 }
             </style>
-            <h3>🎬 抖音自动收藏助手 v3.0</h3>
+            <h3>🎬 抖音自动收藏助手 v4.0</h3>
             
             <div class="rule-box">
                 <div class="rule-title"><span class="A级">⭐ A级</span> 7天内 · 30万~80万点赞</div>
@@ -229,6 +276,13 @@
             <div class="rule-box">
                 <div class="rule-title"><span class="S级">🌟 S级</span> 7天外+80万 或 100万以上</div>
                 <div>收藏到: "S级待分类"</div>
+            </div>
+            
+            <div class="rule-box">
+                <div class="rule-title">⏱️ 进度规则</div>
+                <div>短视频(
+                <strong>&lt;2分钟</strong>: 70%~99%随机</div>
+                <div><strong>≥2分钟</strong>: 40%~60%随机</div>
             </div>
             
             <div class="status">
@@ -782,6 +836,7 @@
         lastVideoSrc = currentSrc;
 
         isProcessing = true;
+        currentTargetProgress = 0; // 重置目标进度
         updateStatus('正在分析视频...');
 
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -790,7 +845,7 @@
 
         const { likes, timeAgo, daysAgo, progress, duration } = getCurrentVideoData();
         
-        console.log(`[抖音自动助手] 视频数据 - 点赞: ${formatNumber(likes)}, 发布时间: ${timeAgo || '未知'}`);
+        console.log(`[抖音自动助手] 视频数据 - 点赞: ${formatNumber(likes)}, 发布时间: ${timeAgo || '未知'}, 时长: ${formatTime(duration)}`);
         
         updateVideoInfo(formatNumber(likes), timeAgo || '未知', '分析中...', '');
         updateProgress(progress, duration);
@@ -806,17 +861,22 @@
             return;
         }
 
+        // 为当前视频生成随机目标进度
+        currentTargetProgress = getRandomProgress(duration);
+        const videoType = isVideoTypeText(duration);
+        const targetPercent = Math.round(currentTargetProgress * 100);
+        
         const folderName = classification === 'S' ? CONFIG.S_LEVEL_FOLDER : CONFIG.A_LEVEL_FOLDER;
         const levelName = classification === 'S' ? 'S级' : 'A级';
         
-        updateStatus(`${levelName}视频，等待播放进度...`);
+        console.log(`[抖音自动助手] 📊 ${videoType}，目标进度: ${targetPercent}%`);
+        updateStatus(`${levelName}${videoType}，播放至${targetPercent}%...`);
 
         if (!isVideoPlaying(video)) {
             await autoPlayVideo();
         }
 
-        console.log(`[抖音自动助手] 📊 等待视频播放进度达到 ${CONFIG.PLAY_PROGRESS_MIN * 100}%...`);
-        await waitForProgress(video, CONFIG.PLAY_PROGRESS_MIN);
+        await waitForProgress(video, currentTargetProgress);
         
         updateProgress(getVideoProgress(video), duration);
 
@@ -826,7 +886,7 @@
             console.log(`[抖音自动助手] 📊 播放进度已达标: ${Math.round(getVideoProgress(video) * 100)}%`);
         }
 
-        updateStatus(`${levelName}视频播放进度达标，执行收藏...`);
+        updateStatus(`${levelName}播放进度达标，执行收藏...`);
 
         const liked = await clickLikeButton();
         if (!liked) {
